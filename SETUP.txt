@@ -1,0 +1,171 @@
+DEVOFFICE — GUIA DE PUESTA EN MARCHA
+=====================================
+(Ver README.md para la documentacion completa de arquitectura y endpoints.
+ Este archivo es solo la guia rapida de "como levantarlo" y "que configurar".)
+
+------------------------------------------------------------
+1. REQUISITOS PREVIOS
+------------------------------------------------------------
+- Node.js 20+ (recomendado). Tambien funciona en Node 18.16 porque todas las
+  dependencias del proyecto estan fijadas a versiones compatibles — ver la
+  seccion de Troubleshooting del README si algo falla por version de Node.
+- npm 9+
+- SQL Server (NO PostgreSQL, pese a lo que sugiera cualquier codigo o doc
+  externa de referencia). Puede ser:
+    a) Una instancia local ya instalada (recomendado en este entorno, sin
+       Docker), o
+    b) El contenedor que trae docker-compose.yml (opcional).
+- Docker y Docker Compose SOLO si eliges la opcion (b). No es necesario para
+  el desarrollo local del dia a dia.
+
+------------------------------------------------------------
+2. BASE DE DATOS — CONFIGURACION SIN DOCKER (recomendado)
+------------------------------------------------------------
+Con una instancia de SQL Server ya corriendo (autenticacion mixta habilitada),
+crear la base y un login dedicado:
+
+    CREATE DATABASE devoffice;
+    CREATE LOGIN devoffice WITH PASSWORD = 'TuPasswordSegura#1', CHECK_POLICY = ON;
+    USE devoffice;
+    CREATE USER devoffice FOR LOGIN devoffice;
+    ALTER ROLE db_owner ADD MEMBER devoffice;
+    -- Necesario para que "prisma migrate dev" pueda crear su shadow database:
+    ALTER SERVER ROLE dbcreator ADD MEMBER devoffice;
+
+Luego usar esas credenciales en DATABASE_URL (ver seccion 4).
+
+CON DOCKER (alternativa):
+docker-compose.yml ya levanta un contenedor de SQL Server
+(mcr.microsoft.com/mssql/server:2022-latest) listo para usar. Ver seccion 6.
+
+------------------------------------------------------------
+3. INSTALACION — DESARROLLO LOCAL (sin Docker)
+------------------------------------------------------------
+# Backend
+cd backend
+copy .env.example .env        (en PowerShell: Copy-Item .env.example .env)
+# Editar DATABASE_URL en .env con las credenciales de tu SQL Server (ver seccion 4)
+npm install
+npm run prisma:generate
+npm run prisma:migrate
+npm run prisma:seed
+npm run start:dev
+
+# Frontend (en otra terminal)
+cd frontend
+copy .env.example .env
+npm install
+npm run dev
+
+URLs:
+- Frontend:      http://localhost:5173
+- Backend REST:  http://localhost:3000/api
+- Swagger docs:  http://localhost:3000/api/docs
+
+------------------------------------------------------------
+4. VARIABLES DE ENTORNO A CONFIGURAR
+------------------------------------------------------------
+backend/.env (copiado desde backend/.env.example):
+
+  NODE_ENV=development
+  PORT=3000
+
+  DATABASE_URL="sqlserver://localhost:1433;database=devoffice;user=devoffice;password=TU_PASSWORD;trustServerCertificate=true"
+    -> AJUSTAR host/puerto/usuario/password segun tu instancia de SQL Server.
+
+  JWT_SECRET=<cambiar por un secreto real>
+  JWT_EXPIRES_IN=15m
+  JWT_REFRESH_SECRET=<cambiar por otro secreto real, distinto de JWT_SECRET>
+  JWT_REFRESH_EXPIRES_IN=7d
+    -> El servidor NO arranca si falta cualquiera de estos dos secretos
+       (validacion con Joi al iniciar).
+
+  CORS_ORIGIN=http://localhost:5173
+    -> Debe coincidir con el origen real desde el que sirves el frontend.
+
+  LOG_LEVEL=debug
+
+  SEED_ADMIN_PASSWORD=ChangeMe#Admin1
+  SEED_MANAGER_PASSWORD=ChangeMe#Manager1
+  SEED_DEVELOPER_PASSWORD=ChangeMe#Dev1
+    -> Solo se usan al correr "npm run prisma:seed". Son valores de
+       desarrollo local; no representan ninguna contraseña real.
+
+frontend/.env (copiado desde frontend/.env.example):
+
+  VITE_API_URL=http://localhost:3000/api
+  VITE_SOCKET_URL=http://localhost:3000
+    -> Ajustar si el backend corre en otro host/puerto.
+
+------------------------------------------------------------
+5. USUARIOS DE PRUEBA (creados por "npm run prisma:seed")
+------------------------------------------------------------
+  Admin:      admin@devoffice.local       / ChangeMe#Admin1
+  Manager:    manager@devoffice.local     / ChangeMe#Manager1
+  Developer:  juan.perez@devoffice.local  / ChangeMe#Dev1
+  Developer:  carlos.lopez@devoffice.local/ ChangeMe#Dev1
+    (hay mas developers sembrados; revisar backend/prisma/seed.ts para la lista completa)
+
+Las contraseñas reales de un entorno compartido deben cambiarse via las
+variables SEED_*_PASSWORD antes de sembrar, o directamente en la base despues.
+
+------------------------------------------------------------
+6. INSTALACION — CON DOCKER (opcional, todo el stack de una vez)
+------------------------------------------------------------
+cd "DEV OFFICE 2D"
+copy .env.example .env
+# Editar .env en la raiz (variables MSSQL_SA_PASSWORD, JWT_SECRET, JWT_REFRESH_SECRET, etc.)
+docker compose up
+
+URLs:
+- Frontend:    http://localhost:5173
+- Backend:     http://localhost:3000/api
+- SQL Server:  localhost:1433
+
+NOTA IMPORTANTE: docker-compose.yml y ambos Dockerfile estan escritos y
+revisados, pero "docker compose build && docker compose up" NUNCA se corrio
+de punta a punta en este entorno de desarrollo (Docker Desktop no estaba
+disponible). Es el primer punto a revisar si algo no levanta a la primera.
+
+------------------------------------------------------------
+7. SCRIPTS UTILES
+------------------------------------------------------------
+Backend (dentro de backend/):
+  npm run start:dev        Servidor en modo watch
+  npm run build             Compila a dist/
+  npm run test               Tests unitarios (Jest)
+  npm run test:e2e           Tests end-to-end (Supertest, corre en serie)
+  npm run lint                ESLint
+  npm run prisma:generate     Genera el Prisma Client
+  npm run prisma:migrate      Aplica migraciones
+  npm run prisma:seed         Ejecuta el seed
+  npm run prisma:studio       Abre Prisma Studio (explorador visual de la BD)
+
+Frontend (dentro de frontend/):
+  npm run dev        Servidor de desarrollo (Vite)
+  npm run build       Build de produccion
+  npm run test          Tests (Vitest + React Testing Library)
+  npm run lint            ESLint
+
+------------------------------------------------------------
+8. PROBLEMAS FRECUENTES (ver README.md > Troubleshooting para el detalle)
+------------------------------------------------------------
+- Errores de version de Node en "npm install"/build -> revisar que package.json
+  tenga las versiones fijadas compatibles (Prisma 5, pino 8, jsdom 25, etc.).
+- "prisma migrate dev" falla con "could not create the shadow database" ->
+  falta el rol "dbcreator" en el login de SQL Server (ver seccion 2).
+- Tests e2e del backend lentos/colgados en paralelo -> es esperado, corren
+  con --runInBand a proposito (una sola instancia de SQL Server local).
+- 429 Too Many Requests en tests -> confirmar que NODE_ENV=test se esta
+  seteando (jest-e2e.setup.ts) antes de que cargue el modulo de la app.
+- Docker Desktop no esta corriendo -> no es necesario para desarrollo local;
+  usar el setup sin Docker (seccion 2/3).
+
+------------------------------------------------------------
+9. ESTADO DEL PROYECTO
+------------------------------------------------------------
+13 de las 14 fases del proyecto estan completas y verificadas (build, tests
+automatizados — 118 en total — y pruebas manuales en navegador real). La
+unica fase pendiente es la validacion end-to-end de Docker (seccion 6),
+dejada pendiente a proposito por falta de Docker Desktop en este entorno.
+Ver README.md > Roadmap para el detalle fase por fase.

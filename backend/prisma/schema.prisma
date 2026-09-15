@@ -1,0 +1,230 @@
+// DevOffice — Prisma schema (SQL Server)
+//
+// Notas de compatibilidad con SQL Server (vs. el diseño original pensado para PostgreSQL):
+//
+// 1. SQL Server no soporta el tipo `enum` nativo de Prisma. UserRole, TaskStatus y
+//    TaskPriority se modelan como `String` con el valor validado en la capa de
+//    aplicación (ver los enums de TypeScript en `src/common/enums/`).
+// 2. SQL Server limita las claves de índice a 900 bytes. Todo campo indexado/único
+//    (ids, foreign keys, códigos únicos) declara explícitamente un `@db.NVarChar(n)`
+//    corto en vez del NVarChar(1000) que Prisma usa por defecto para `String`.
+// 3. Para evitar "multiple cascade paths" (SQL Server no permite que una fila sea
+//    alcanzable por más de una ruta de cascada), solo se usa `onDelete: Cascade` en
+//    relaciones de composición estricta (el hijo no tiene sentido sin el padre).
+//    El resto usa `NoAction`/`SetNull` y la limpieza se maneja a nivel de aplicación
+//    (los modelos ya incluyen `isActive` para soft-delete donde aplica).
+// 4. La regla de "una sola actividad activa por developer" (sección 11 del spec) se
+//    garantiza con un índice único filtrado que Prisma no puede expresar en el DSL:
+//    se añade a mano en la migración generada.
+//    CREATE UNIQUE INDEX one_active_activity_per_developer
+//    ON DeveloperActivity (developerId) WHERE endedAt IS NULL;
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String  @id @default(uuid()) @db.NVarChar(36)
+  email        String  @unique @db.NVarChar(255)
+  passwordHash String  @db.NVarChar(255)
+  firstName    String  @db.NVarChar(100)
+  lastName     String  @db.NVarChar(100)
+  avatarUrl    String? @db.NVarChar(500)
+  isActive     Boolean @default(true)
+
+  roleAssignments UserRoleAssignment[]
+  refreshTokens   RefreshToken[]
+  developer       Developer?
+  activities      DeveloperActivity[]
+  createdTasks    Task[]               @relation("TaskCreator")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+}
+
+// UserRole: ADMIN | MANAGER | DEVELOPER | VIEWER
+model UserRoleAssignment {
+  id     String @id @default(uuid()) @db.NVarChar(36)
+  userId String @db.NVarChar(36)
+  role   String @db.NVarChar(20)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([userId, role])
+}
+
+// Stores a hash of each issued refresh token so logout / rotation can revoke
+// them server-side (a signed JWT alone can't be invalidated before it expires).
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.NVarChar(36)
+  userId    String    @db.NVarChar(36)
+  tokenHash String    @db.NVarChar(64)
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Developer {
+  id     String @id @default(uuid()) @db.NVarChar(36)
+  userId String @unique @db.NVarChar(36)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  officePosition OfficePosition?
+  activities     DeveloperActivity[]
+  tasks          Task[]
+  meetingMembers MeetingParticipant[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Project {
+  id          String  @id @default(uuid()) @db.NVarChar(36)
+  name        String  @db.NVarChar(200)
+  code        String  @unique @db.NVarChar(50)
+  description String? @db.NVarChar(1000)
+  isActive    Boolean @default(true)
+
+  tasks Task[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// TaskStatus: TODO | IN_PROGRESS | BLOCKED | IN_REVIEW | DONE
+// TaskPriority: LOW | MEDIUM | HIGH | CRITICAL
+model Task {
+  id          String  @id @default(uuid()) @db.NVarChar(36)
+  code        String  @unique @db.NVarChar(50)
+  title       String  @db.NVarChar(300)
+  description String? @db.NVarChar(2000)
+
+  projectId    String  @db.NVarChar(36)
+  assignedToId String? @db.NVarChar(36)
+  createdById  String  @db.NVarChar(36)
+
+  status   String @default("TODO") @db.NVarChar(20)
+  priority String @default("MEDIUM") @db.NVarChar(20)
+
+  dueDate DateTime?
+
+  project    Project    @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  assignedTo Developer? @relation(fields: [assignedToId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  createdBy  User       @relation("TaskCreator", fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  activities DeveloperActivity[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([assignedToId])
+  @@index([status])
+}
+
+model DeveloperStatus {
+  id           String  @id @default(uuid()) @db.NVarChar(36)
+  code         String  @unique @db.NVarChar(50)
+  name         String  @db.NVarChar(100)
+  description  String? @db.NVarChar(500)
+  icon         String? @db.NVarChar(20)
+  color        String? @db.NVarChar(20)
+  isProductive Boolean @default(false)
+  requiresTask Boolean @default(false)
+  isActive     Boolean @default(true)
+
+  activities DeveloperActivity[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model DeveloperActivity {
+  id String @id @default(uuid()) @db.NVarChar(36)
+
+  developerId String  @db.NVarChar(36)
+  userId      String  @db.NVarChar(36)
+  statusId    String  @db.NVarChar(36)
+  taskId      String? @db.NVarChar(36)
+
+  description String? @db.NVarChar(1000)
+
+  startedAt       DateTime
+  endedAt         DateTime?
+  durationSeconds Int?
+
+  developer Developer       @relation(fields: [developerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user      User            @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  status    DeveloperStatus @relation(fields: [statusId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  task      Task?           @relation(fields: [taskId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([developerId, endedAt])
+  @@index([startedAt])
+  @@index([taskId])
+}
+
+model Meeting {
+  id          String  @id @default(uuid()) @db.NVarChar(36)
+  title       String  @db.NVarChar(300)
+  description String? @db.NVarChar(1000)
+
+  // Nullable, not required as in the original spec draft: POST /meetings (create)
+  // and POST /meetings/:id/start are separate endpoints (section 16), so a meeting
+  // can exist before it has actually started — startedAt is set by /start, endedAt
+  // by /finish, mirroring the DeveloperActivity start/finish lifecycle.
+  startedAt DateTime?
+  endedAt   DateTime?
+
+  participants MeetingParticipant[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model MeetingParticipant {
+  id String @id @default(uuid()) @db.NVarChar(36)
+
+  meetingId   String @db.NVarChar(36)
+  developerId String @db.NVarChar(36)
+
+  meeting   Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  developer Developer @relation(fields: [developerId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([meetingId, developerId])
+}
+
+model OfficePosition {
+  id String @id @default(uuid()) @db.NVarChar(36)
+
+  developerId String @unique @db.NVarChar(36)
+
+  x        Float
+  y        Float
+  width    Float  @default(64)
+  height   Float  @default(64)
+  rotation Float  @default(0)
+
+  area String? @db.NVarChar(50)
+
+  developer Developer @relation(fields: [developerId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
